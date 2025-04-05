@@ -23,13 +23,13 @@ logger = logging.getLogger(__name__)
 
 # Cấu hình bot
 class Config:
-    API_ID = int(environ.get("API_ID", "YOUR_API_ID"))  # Thay bằng API_ID của bạn
-    API_HASH = environ.get("API_HASH", "YOUR_API_HASH")  # Thay bằng API_HASH
-    BOT_TOKEN = environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN")  # Thay bằng BOT_TOKEN
+    API_ID = int(environ.get("API_ID"))
+    API_HASH = environ.get("API_HASH")
+    BOT_TOKEN = environ.get("BOT_TOKEN")
     BOT_SESSION = environ.get("BOT_SESSION", "AutoForwardBot")
-    DATABASE_URI = environ.get("DATABASE_URI", "mongodb+srv://your_username:your_password@cluster0.mongodb.net/?retryWrites=true&w=majority")
+    DATABASE_URI = environ.get("DATABASE_URI")
     DATABASE_NAME = environ.get("DATABASE_NAME", "AutoForwardBotDB")
-    BOT_OWNER = int(environ.get("BOT_OWNER", "YOUR_USER_ID"))  # Thay bằng ID Telegram của bạn
+    BOT_OWNER = int(environ.get("BOT_OWNER"))
 
 # Quản lý trạng thái tạm thời
 class Temp:
@@ -89,31 +89,38 @@ async def iter_messages(client, chat_id: Union[int, str], limit: int, offset: in
 
 # Tự động forward tin nhắn từ nhiều nguồn đến nhiều đích
 async def auto_forward(userbot, user_id):
-    details = await db.get_forward_details(user_id)
-    source_chats = details["source_chats"]
-    target_chats = details["target_chats"]
-    last_ids = details.get("last_id", {})
+    while True:  # Vòng lặp để chạy lại nếu gặp lỗi
+        try:
+            details = await db.get_forward_details(user_id)
+            source_chats = details["source_chats"]
+            target_chats = details["target_chats"]
+            last_ids = details.get("last_id", {})
 
-    if not source_chats or not target_chats:
-        return
+            if not source_chats or not target_chats:
+                await asyncio.sleep(60)  # Chờ 1 phút nếu không có cấu hình
+                continue
 
-    for source in source_chats:
-        async for message in iter_messages(userbot, source, limit=1000000, offset=last_ids.get(str(source), 0)):
-            try:
-                for target in target_chats:
-                    await userbot.forward_messages(target, message)
-                    logger.info(f"Forwarded message {message.id} from {source} to {target}")
-                Temp.forwardings += 1
-                last_ids[str(source)] = message.id
-                await db.update_forward(userbot.session_name, {
-                    "source_chats": source_chats,
-                    "target_chats": target_chats,
-                    "last_id": last_ids,
-                    "fetched": Temp.forwardings
-                })
-                await asyncio.sleep(1)  # Tránh giới hạn Telegram
-            except Exception as e:
-                logger.error(f"Error forwarding message: {e}")
+            for source in source_chats:
+                async for message in iter_messages(userbot, source, limit=1000000, offset=last_ids.get(str(source), 0)):
+                    try:
+                        for target in target_chats:
+                            await userbot.forward_messages(target, message)
+                            logger.info(f"Forwarded message {message.id} from {source} to {target}")
+                        Temp.forwardings += 1
+                        last_ids[str(source)] = message.id
+                        await db.update_forward(userbot.session_name, {
+                            "source_chats": source_chats,
+                            "target_chats": target_chats,
+                            "last_id": last_ids,
+                            "fetched": Temp.forwardings
+                        })
+                        await asyncio.sleep(1)  # Tránh giới hạn Telegram
+                    except Exception as e:
+                        logger.error(f"Error forwarding message: {e}")
+                        await asyncio.sleep(5)  # Chờ 5 giây trước khi thử lại
+        except Exception as e:
+            logger.error(f"Error in auto_forward for userbot {user_id}: {e}")
+            await asyncio.sleep(60)  # Chờ 1 phút trước khi khởi động lại
 
 # Xử lý lệnh
 @bot.on_message(filters.command("start") & filters.private)
@@ -166,21 +173,27 @@ async def stop_command(client, message):
 
 # Khởi động bot và userbots
 async def main():
-    # Khởi động bot chính
-    await bot.start()
-    bot_info = await bot.get_me()
-    logger.info(f"Bot started: @{bot_info.username}")
+    while True:  # Vòng lặp để tự động khởi động lại nếu bot gặp lỗi
+        try:
+            # Khởi động bot chính
+            await bot.start()
+            bot_info = await bot.get_me()
+            logger.info(f"Bot started: @{bot_info.username}")
 
-    # Đăng nhập userbots từ DB
-    async for ubot in db.get_userbots():
-        client = Client(f"session_{ubot['user_id']}", session_string=ubot["session"], api_id=Config.API_ID, api_hash=Config.API_HASH)
-        await client.start()
-        userbots.append(client)
-        logger.info(f"Userbot {ubot['user_id']} started")
-        asyncio.create_task(auto_forward(client, ubot["user_id"]))
+            # Đăng nhập userbots từ DB
+            async for ubot in db.get_userbots():
+                client = Client(f"session_{ubot['user_id']}", session_string=ubot["session"], api_id=Config.API_ID, api_hash=Config.API_HASH)
+                await client.start()
+                userbots.append(client)
+                logger.info(f"Userbot {ubot['user_id']} started")
+                asyncio.create_task(auto_forward(client, ubot["user_id"]))
 
-    # Giữ bot chạy
-    await idle()
+            # Giữ bot chạy
+            await idle()
+        except Exception as e:
+            logger.error(f"Bot crashed: {e}")
+            await bot.stop()
+            await asyncio.sleep(60)  # Chờ 1 phút trước khi khởi động lại
 
 if __name__ == "__main__":
     # Chạy Flask trong thread riêng
