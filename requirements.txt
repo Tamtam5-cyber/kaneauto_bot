@@ -1,4 +1,3 @@
-aiogram
-telethon
-asyncio
-sqlite3
+flask
+pyrogram
+motor
